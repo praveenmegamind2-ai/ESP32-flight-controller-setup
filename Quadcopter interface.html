@@ -1,0 +1,216 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ESP32 Flight UI — Hover Assist</title>
+
+<style>
+:root{
+  --bg:#0b1220;
+  --panel:#101a2f;
+  --panel2:#0f172a;
+  --text:#e6edf7;
+  --muted:rgba(230,237,247,.65);
+  --line:rgba(230,237,247,.12);
+  --good:#7ee787;
+  --bad:#fca5a5;
+  --warn:#fbbf24;
+}
+body{
+  margin:12px;
+  font-family:Arial, sans-serif;
+  background:var(--bg);
+  color:var(--text)
+}
+h2,h3{margin:6px 0}
+.grid{display:grid;grid-template-columns:1fr;gap:12px}
+@media(min-width:900px){.grid{grid-template-columns:1fr 1fr}}
+
+.card{
+  background:linear-gradient(180deg,var(--panel),var(--panel2));
+  border:1px solid var(--line);
+  border-radius:14px;
+  padding:12px
+}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.mono{font-family:ui-monospace,Menlo,Consolas,monospace}
+.muted{color:var(--muted)}
+.pill{padding:6px 10px;border:1px solid var(--line);border-radius:999px;background:rgba(255,255,255,.04)}
+input{
+  padding:6px 8px;
+  border-radius:10px;
+  border:1px solid var(--line);
+  background:rgba(0,0,0,.18);
+  color:var(--text)
+}
+button{
+  padding:8px 12px;
+  border-radius:12px;
+  border:1px solid var(--line);
+  background:rgba(255,255,255,.06);
+  color:var(--text);
+  cursor:pointer
+}
+button:hover{background:rgba(255,255,255,.12)}
+.kbd{
+  display:inline-block;
+  padding:2px 6px;
+  border:1px solid var(--line);
+  border-radius:8px;
+  background:rgba(0,0,0,.18);
+  font-family:ui-monospace;
+  font-size:12px
+}
+canvas{
+  width:100%;
+  height:auto;
+  background:rgba(0,0,0,.18);
+  border:1px solid var(--line);
+  border-radius:12px
+}
+.small{font-size:12px}
+</style>
+</head>
+
+<body>
+
+<h2>ESP32 Flight UI — Hover Assist</h2>
+
+<!-- ================= CONNECTION ================= -->
+<div class="card">
+  <div class="row">
+    <button onclick="connectWS()">Connect</button>
+    <button onclick="disconnectWS()">Disconnect</button>
+    <div class="pill mono">WS: <span id="ws" class="muted">disconnected</span></div>
+    <div class="pill mono">ACK: <span id="ack" class="muted">--</span></div>
+  </div>
+</div>
+
+<!-- ================= ATTITUDE ================= -->
+<div class="grid">
+  <div class="card">
+    <h3>3D Attitude</h3>
+    <canvas id="c3d" width="520" height="360"></canvas>
+  </div>
+  <div class="card">
+    <h3>Artificial Horizon</h3>
+    <canvas id="hzn" width="520" height="360"></canvas>
+  </div>
+</div>
+
+<!-- ================= COMMAND CONSOLE ================= -->
+<div class="card">
+  <h3>Command Console (Advanced)</h3>
+
+  <div class="row">
+    <input id="cmdInput" class="mono" style="flex:1"
+      placeholder="LEVELSET | VHOLD,1 | VHPID,0.7,0.2,1.5,1.5">
+    <button onclick="sendCmd()">Send</button>
+  </div>
+
+  <div class="mono muted small" style="margin-top:6px">
+    Reply: <span id="cmdReply">--</span>
+  </div>
+
+  <div class="muted small" style="margin-top:8px; line-height:1.4">
+    <b>Important commands:</b><br>
+    <span class="kbd">LEVELSET</span> — save current attitude as level<br>
+    <span class="kbd">VHOLD,1</span> / <span class="kbd">VHOLD,0</span> — enable / disable drift brake<br>
+    <span class="kbd">VHPID,0.7,0.2,1.5,1.5</span> — tune hover assist
+  </div>
+</div>
+
+<script>
+/* ================= WebSocket ================= */
+let sock=null;
+const wsEl=document.getElementById("ws");
+const ackEl=document.getElementById("ack");
+const cmdReply=document.getElementById("cmdReply");
+
+function setWS(txt,color){
+  wsEl.textContent=txt;
+  wsEl.style.color=color||"var(--muted)";
+}
+
+function connectWS(){
+  if(sock && sock.readyState===1) return;
+  sock=new WebSocket("ws://192.168.4.1:81");
+  sock.binaryType="arraybuffer";
+  setWS("connecting…");
+
+  sock.onopen=()=>setWS("connected","var(--good)");
+  sock.onclose=()=>setWS("disconnected","var(--bad)");
+  sock.onerror=()=>setWS("error","var(--bad)");
+
+  sock.onmessage=e=>{
+    if(typeof e.data==="string"){
+      ackEl.textContent=e.data;
+      cmdReply.textContent=e.data;
+    }
+  };
+}
+
+function disconnectWS(){
+  if(sock){sock.close();sock=null}
+  setWS("disconnected");
+}
+
+/* ================= Command sender ================= */
+function sendCmd(){
+  if(!sock || sock.readyState!==1){
+    alert("WebSocket not connected");
+    return;
+  }
+  const inp=document.getElementById("cmdInput");
+  const cmd=inp.value.trim();
+  if(!cmd) return;
+  sock.send(cmd);
+  cmdReply.textContent="Sent: "+cmd;
+  inp.value="";
+}
+
+/* ================= Simple Attitude Visuals ================= */
+const c3d=document.getElementById("c3d");
+const g3d=c3d.getContext("2d");
+const hzn=document.getElementById("hzn");
+const hz=hzn.getContext("2d");
+
+let roll=0,pitch=0,yaw=0;
+
+function drawHorizon(){
+  const w=hzn.width,h=hzn.height;
+  hz.clearRect(0,0,w,h);
+  hz.save();
+  hz.translate(w/2,h/2);
+  hz.rotate(-roll);
+  const p=pitch*(h/2);
+  hz.fillStyle="#1f6feb";
+  hz.fillRect(-w,-h*2+p,w*2,h*2);
+  hz.fillStyle="#8b5a2b";
+  hz.fillRect(-w,p,w*2,h*2);
+  hz.strokeStyle="#fff";
+  hz.lineWidth=3;
+  hz.beginPath();
+  hz.moveTo(-w,p);hz.lineTo(w,p);
+  hz.stroke();
+  hz.restore();
+}
+
+function draw3D(){
+  g3d.clearRect(0,0,c3d.width,c3d.height);
+  g3d.fillStyle="#fff";
+  g3d.fillText("Attitude streaming from ESP",20,20);
+}
+
+/* ================= Render loop ================= */
+function render(){
+  drawHorizon();
+  draw3D();
+  requestAnimationFrame(render);
+}
+render();
+</script>
+
+</body>
+</html>
